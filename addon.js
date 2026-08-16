@@ -23,6 +23,13 @@ let HEADERS = {
     "Referer": `${MAIN_URL}/`
 };
 
+// ഡൈനാമിക് ആയി വെബ്സൈറ്റിന്റെ URL കണ്ടുപിടിക്കാൻ
+let BASE_URL = `http://localhost:${PORT}`;
+app.use((req, res, next) => {
+    BASE_URL = `${req.protocol}://${req.get('host')}`;
+    next();
+});
+
 async function fetchAndUpdateDomain() {
     try {
         const response = await axios.get(DOMAINS_URL, { httpsAgent: agent });
@@ -44,7 +51,7 @@ async function fetchAndUpdateDomain() {
 // ==========================================
 const manifest = {
     id: 'org.cinefreak.streams',
-    version: '1.0.4',
+    version: '1.0.5',
     name: 'CineFreak Streamer',
     description: 'Direct Fast Streaming Addon for CineFreak',
     resources: ['stream'], 
@@ -56,7 +63,7 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 // ==========================================
-// 3. Stream Handler
+// 3. Stream Handler (Fast Load)
 // ==========================================
 builder.defineStreamHandler(async (args) => {
     console.log(`\n================================`);
@@ -80,20 +87,19 @@ builder.defineStreamHandler(async (args) => {
         const searchData = searchRes.data;
 
         if (!searchData || !searchData.results || searchData.results.length === 0) {
-            console.log("❌ Movie not found in search results.");
+            console.log("❌ Movie not found.");
             return { streams: [] };
         }
 
         let movieSlug = searchData.results[0].l; 
         let moviePageUrl = `${MAIN_URL}/${movieSlug}/`;
-        console.log(`🔗 Found Movie Page: ${moviePageUrl}`);
         
         const movieRes = await axios.get(moviePageUrl, { headers: HEADERS, httpsAgent: agent });
         const $movie = cheerio.load(movieRes.data);
 
         let streams = [];
-        let extractTasks = [];
 
+        // ഇവിടെ വെയിറ്റിംഗ് ഇല്ല, ലിങ്കുകൾ നേരിട്ട് ആഡ് ചെയ്യുന്നു
         $movie('.dlbtn-container').each((i, el) => {
             const rawTitle = $movie(el).prev('h4.movie-title').text().replace(/\s+/g, ' ').trim() || `Link ${i+1}`;
             const watchBtn = $movie(el).find('.dlbtn-watch').attr('href');
@@ -101,118 +107,23 @@ builder.defineStreamHandler(async (args) => {
             const targetBtn = downloadBtn || watchBtn; 
 
             if (targetBtn && targetBtn.includes('generate.php?id=')) {
-                extractTasks.push(async () => {
-                    try {
-                        const encodedId = targetBtn.split('id=')[1];
-                        let decodedUrl = Buffer.from(encodedId, 'base64').toString('utf-8').replace('newgo32', '');
-                        let directLink = null;
+                const encodedId = targetBtn.split('id=')[1];
+                let decodedUrl = Buffer.from(encodedId, 'base64').toString('utf-8').replace('newgo32', '');
+                
+                let qualityMatch = rawTitle.match(/(480p|720p|1080p|2160p|4K)/i);
+                let quality = qualityMatch ? qualityMatch[1] : 'HD';
+                let cleanTitle = rawTitle.replace(/(SD|HD|HEVC|480p|720p|1080p|2160p|4K|-2160p)/ig, '').replace(/\s+/g, ' ').trim();
 
-                        if (FLARESOLVERR_URL) {
-                            // --- Render / Cloudflare Bypass Logic (FlareSolverr) ---
-                            console.log(`\n[FlareSolverr] Bypassing: ${decodedUrl}`);
-                            let sessionId = `sess_${Date.now()}_${Math.floor(Math.random() * 100)}`;
-                            
-                            try {
-                                await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'sessions.create', session: sessionId });
-                                
-                                let getRes = await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'request.get', url: decodedUrl, session: sessionId, maxTimeout: 60000 });
-                                let $cloud = cheerio.load(getRes.data.solution.response);
-                                
-                                if ($cloud('title').text().includes('Just a moment')) {
-                                    console.log(`❌ Cloudflare Blocked FlareSolverr!`);
-                                    return;
-                                }
-
-                                let csrfToken = $cloud('meta[name="X-CSRF-TOKEN"]').attr('content');
-
-                                directLink = $cloud('a.fsl-btn').attr('href') || $cloud('a.download-now').attr('href');
-                                if (!directLink || !directLink.startsWith('http')) {
-                                    $cloud('a').each((_, a) => {
-                                        const href = $cloud(a).attr('href');
-                                        if (href && (href.match(/\.(mkv|mp4)/i) || href.includes('r2.dev') || href.includes('r2.cloudflarestorage'))) directLink = href;
-                                    });
-                                }
-
-                                if (!directLink && csrfToken) {
-                                    console.log(`[CSRF] Sending POST request via FlareSolverr...`);
-                                    let postUrl = decodedUrl.includes('/x/') ? decodedUrl.replace('/x/', '/w/') : decodedUrl.replace('/f/', '/fastdl/'); 
-
-                                    let postRes = await axios.post(`${FLARESOLVERR_URL}/v1`, { 
-                                        cmd: 'request.post', 
-                                        url: postUrl, 
-                                        session: sessionId, 
-                                        postData: `csrf_test_name=${csrfToken}`,
-                                        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest" },
-                                        maxTimeout: 60000 
-                                    });
-                                    
-                                    let postText = cheerio.load(postRes.data.solution.response)('body').text();
-                                    try {
-                                        let parsed = JSON.parse(postText);
-                                        if (parsed.url) directLink = parsed.url;
-                                    } catch(e) {
-                                        let jsonMatch = postRes.data.solution.response.match(/["']?url["']?\s*:\s*["'](https?:\/\/[^"']+)["']/i);
-                                        if (jsonMatch) directLink = jsonMatch[1].replace(/\\\//g, '/');
-                                    }
-                                }
-                            } finally {
-                                await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'sessions.destroy', session: sessionId }).catch(()=>{});
-                            }
-                        } else {
-                            // --- Local Testing Logic (Normal Axios) ---
-                            console.log(`\n[Local] Fetching: ${decodedUrl}`);
-                            const cloudRes = await axios.get(decodedUrl, { headers: HEADERS, httpsAgent: agent });
-                            const $cloud = cheerio.load(cloudRes.data);
-                            const csrfToken = $cloud('meta[name="X-CSRF-TOKEN"]').attr('content');
-                            const cookies = cloudRes.headers['set-cookie'] ? cloudRes.headers['set-cookie'].map(c => c.split(';')[0]).join('; ') : '';
-
-                            directLink = $cloud('a.fsl-btn').attr('href') || $cloud('a.download-now').attr('href');
-                            if (!directLink || !directLink.startsWith('http')) {
-                                $cloud('a').each((_, a) => {
-                                    const href = $cloud(a).attr('href');
-                                    if (href && (href.match(/\.(mkv|mp4)/i) || href.includes('r2.dev') || href.includes('r2.cloudflarestorage'))) directLink = href;
-                                });
-                            }
-
-                            if (!directLink && csrfToken) {
-                                console.log(`[CSRF] Sending POST request for hidden link...`);
-                                let postUrl = decodedUrl.includes('/x/') ? decodedUrl.replace('/x/', '/w/') : decodedUrl.replace('/f/', '/fastdl/'); 
-                                const postRes = await axios.post(postUrl, `csrf_test_name=${csrfToken}`, {
-                                    headers: { ...HEADERS, 'Cookie': cookies, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest', 'Referer': decodedUrl },
-                                    httpsAgent: agent
-                                });
-                                if (postRes.data && postRes.data.url) directLink = postRes.data.url;
-                            }
-                        }
-
-                        if (directLink && directLink.startsWith('http')) {
-                            let qualityMatch = rawTitle.match(/(480p|720p|1080p|2160p|4K)/i);
-                            let quality = qualityMatch ? qualityMatch[1] : 'HD';
-                            let cleanTitle = rawTitle.replace(/(SD|HD|HEVC|480p|720p|1080p|2160p|4K|-2160p)/ig, '').replace(/\s+/g, ' ').trim();
-
-                            streams.push({
-                                name: `CineFreak\n${quality}`,
-                                title: `▶ ${cleanTitle}\n⚡ Direct Stream`,
-                                url: directLink
-                            });
-                            console.log(`✅ Extracted Link: ${quality}`);
-                        } else {
-                            console.log(`❌ Could not find stream link for ${rawTitle}`);
-                        }
-                    } catch (err) {
-                        console.log(`[Error] Failed to resolve link: ${err.message}`);
-                    }
+                // പ്ലേ ചെയ്യാൻ നമ്മുടെ സ്വന്തം /play റൂട്ടിലേക്ക് തിരിച്ചുവിടുന്നു
+                streams.push({
+                    name: `CineFreak\n${quality}`,
+                    title: `▶ ${cleanTitle}\n⚡ Direct Stream`,
+                    url: `${BASE_URL}/play?target=${encodeURIComponent(decodedUrl)}`
                 });
             }
         });
 
-        // റാം ക്രാഷ് ആവാതിരിക്കാൻ 1 സെക്കൻഡ് ഗ്യാപ്പ് ഇട്ട് റൺ ചെയ്യുന്നു
-        for (let task of extractTasks) {
-            await task();
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        
-        console.log(`\n🎯 Extracted Total ${streams.length} streams!`);
+        console.log(`🎯 Quickly Extracted ${streams.length} streams!`);
         return { streams };
 
     } catch (error) {
@@ -222,14 +133,96 @@ builder.defineStreamHandler(async (args) => {
 });
 
 // ==========================================
-// 4. Server Start
+// 4. On-Demand Stream Resolver (Redirect)
 // ==========================================
-app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    next();
+app.get('/play', async (req, res) => {
+    const targetUrl = req.query.target;
+    if (!targetUrl) return res.status(400).send("No target URL provided.");
+
+    console.log(`\n▶️ [PLAY CLICKED] Resolving: ${targetUrl}`);
+    let directLink = null;
+
+    try {
+        if (FLARESOLVERR_URL) {
+            console.log(`[Proxy] Using FlareSolverr...`);
+            let sessionId = `sess_${Date.now()}`;
+            try {
+                await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'sessions.create', session: sessionId });
+                let getRes = await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'request.get', url: targetUrl, session: sessionId, maxTimeout: 60000 });
+                let $cloud = cheerio.load(getRes.data.solution.response);
+                
+                let csrfToken = $cloud('meta[name="X-CSRF-TOKEN"]').attr('content');
+                directLink = $cloud('a.fsl-btn').attr('href') || $cloud('a.download-now').attr('href');
+                
+                if (!directLink || !directLink.startsWith('http')) {
+                    $cloud('a').each((_, a) => {
+                        const href = $cloud(a).attr('href');
+                        if (href && (href.match(/\.(mkv|mp4)/i) || href.includes('r2.dev') || href.includes('r2.cloudflarestorage'))) directLink = href;
+                    });
+                }
+
+                if (!directLink && csrfToken) {
+                    console.log(`[CSRF] Sending POST request via FlareSolverr...`);
+                    let postUrl = targetUrl.includes('/x/') ? targetUrl.replace('/x/', '/w/') : targetUrl.replace('/f/', '/fastdl/'); 
+                    let postRes = await axios.post(`${FLARESOLVERR_URL}/v1`, { 
+                        cmd: 'request.post', url: postUrl, session: sessionId, postData: `csrf_test_name=${csrfToken}`,
+                        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest" }, maxTimeout: 60000 
+                    });
+                    
+                    let postText = cheerio.load(postRes.data.solution.response)('body').text();
+                    try {
+                        let parsed = JSON.parse(postText);
+                        if (parsed.url) directLink = parsed.url;
+                    } catch(e) {
+                        let jsonMatch = postText.match(/["']?url["']?\s*:\s*["'](https?:\/\/[^"']+)["']/i);
+                        if (jsonMatch) directLink = jsonMatch[1].replace(/\\\//g, '/');
+                    }
+                }
+            } finally {
+                await axios.post(`${FLARESOLVERR_URL}/v1`, { cmd: 'sessions.destroy', session: sessionId }).catch(()=>{});
+            }
+        } else {
+            console.log(`[Local] Direct fetching...`);
+            const cloudRes = await axios.get(targetUrl, { headers: HEADERS, httpsAgent: agent });
+            const $cloud = cheerio.load(cloudRes.data);
+            const csrfToken = $cloud('meta[name="X-CSRF-TOKEN"]').attr('content');
+            const cookies = cloudRes.headers['set-cookie'] ? cloudRes.headers['set-cookie'].map(c => c.split(';')[0]).join('; ') : '';
+
+            directLink = $cloud('a.fsl-btn').attr('href') || $cloud('a.download-now').attr('href');
+            if (!directLink || !directLink.startsWith('http')) {
+                $cloud('a').each((_, a) => {
+                    const href = $cloud(a).attr('href');
+                    if (href && (href.match(/\.(mkv|mp4)/i) || href.includes('r2.dev') || href.includes('r2.cloudflarestorage'))) directLink = href;
+                });
+            }
+
+            if (!directLink && csrfToken) {
+                console.log(`[CSRF] Sending POST request...`);
+                let postUrl = targetUrl.includes('/x/') ? targetUrl.replace('/x/', '/w/') : targetUrl.replace('/f/', '/fastdl/'); 
+                const postRes = await axios.post(postUrl, `csrf_test_name=${csrfToken}`, {
+                    headers: { ...HEADERS, 'Cookie': cookies, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest', 'Referer': targetUrl },
+                    httpsAgent: agent
+                });
+                if (postRes.data && postRes.data.url) directLink = postRes.data.url;
+            }
+        }
+
+        if (directLink && directLink.startsWith('http')) {
+            console.log(`✅ Redirecting to Stream...`);
+            res.redirect(directLink);
+        } else {
+            console.log(`❌ Stream Link Not Found!`);
+            res.status(404).send("Stream not found. The link might be broken or blocked.");
+        }
+    } catch (e) {
+        console.error(`[Play Error] ${e.message}`);
+        res.status(500).send("Error resolving stream");
+    }
 });
 
+// ==========================================
+// 5. Server Start
+// ==========================================
 app.use(getRouter(builder.getInterface()));
 
 app.listen(PORT, () => {
