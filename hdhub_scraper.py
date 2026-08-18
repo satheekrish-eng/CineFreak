@@ -16,11 +16,10 @@ import json
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "HDHub4u Scraper"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 DESCRIPTION = "Filmes do HDHub4u (Direct & m3u8)"
 
 DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
-# ബ്രോ നൽകിയ പുതിയ വർക്കിംഗ് ഡൊമെയ്ൻ
 MAIN_URL = "https://new1.hdhub4u.af" 
 
 # FlareSolverr ഉപയോഗിക്കുന്നുണ്ടെങ്കിൽ ഇവിടെ ലിങ്ക് നൽകാം (ഉദാ: "http://192.168.1.100:8191")
@@ -144,7 +143,8 @@ def get_streams(media_type, media_id, config=None):
     if not movie_name:
         return []
 
-    search_query = urllib.parse.quote(movie_name)
+    # URL-ൽ സ്പേസിന് പകരം '+' വരുന്ന രീതിയിൽ സെറ്റ് ചെയ്യുന്നു
+    search_query = urllib.parse.quote_plus(movie_name)
     search_url = f"{MAIN_URL}/search.html?q={search_query}"
     
     try:
@@ -154,31 +154,25 @@ def get_streams(media_type, media_id, config=None):
         return []
 
     results = []
+    movie_name_lower = movie_name.lower().split()[0] # ആദ്യത്തെ വാക്ക് വെച്ച് നോക്കുന്നു (കൂടുതൽ റിസൾട്ട് കിട്ടാൻ)
 
-    # കർശനമായ പേര് ഒത്തുനോക്കൽ ഒഴിവാക്കി, ആദ്യത്തെ കൃത്യമായ റിസൾട്ട് എടുക്കുന്നു
-    for el in soup.find_all('figcaption'):
-        a_tag = el.find('a')
-        if a_tag:
-            url = a_tag.get('href')
-            title = el.text.strip() or a_tag.text.strip()
-            if url and len(url) > 10:
-                results.append({"title": title, "url": url})
-
-    if not results:
-        for selector in ['article', '.post', '.result-item', '.search-result', '.thumb-wrapper', 'li.thumb']:
-            for el in soup.select(selector):
-                a_tag = el.find('a')
-                if a_tag:
-                    url = a_tag.get('href')
-                    title_elem = el.find(['h2', 'h3', 'p', 'span'])
-                    title = title_elem.text.strip() if title_elem else a_tag.text.strip()
-                    if url and len(url) > 10:
-                        abs_url = url if url.startswith('http') else f"{MAIN_URL}{'' if url.startswith('/') else '/'}{url}"
-                        results.append({"title": title, "url": abs_url})
+    # പേജിലെ മുഴുവൻ ലിങ്കുകളും എടുത്ത് സിനിമയുടെ പേരുണ്ടോ എന്ന് പരിശോധിക്കുന്നു
+    for a_tag in soup.find_all('a', href=True):
+        url = a_tag['href']
+        title = a_tag.text.strip()
+        
+        # ലിങ്കിന്റെ പേരിനകത്തോ, അല്ലെങ്കിൽ URL-നകത്തോ സിനിമയുടെ പേരുണ്ടെങ്കിൽ മാത്രം എടുക്കുന്നു
+        if len(title) > 2 and len(url) > 10:
+            if movie_name_lower in title.lower() or movie_name_lower in url.lower():
+                # അനാവശ്യ ടാഗുകളോ കാറ്റഗറി ലിങ്കുകളോ ഒഴിവാക്കുന്നു
+                if '/category/' not in url and '/tag/' not in url:
+                    abs_url = url if url.startswith('http') else f"{MAIN_URL}{'' if url.startswith('/') else '/'}{url}"
+                    results.append({"title": title, "url": abs_url})
 
     if not results:
         return []
 
+    # കണ്ടെത്തിയ ആദ്യത്തെ ലിങ്ക് എടുക്കുന്നു
     movie_page_url = results[0]["url"]
     
     try:
