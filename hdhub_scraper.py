@@ -16,11 +16,12 @@ import json
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "HDHub4u Scraper"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DESCRIPTION = "Filmes do HDHub4u (Direct & m3u8)"
 
 DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
-MAIN_URL = "https://new2.moviesdrive.christmas"
+# ബ്രോ നൽകിയ പുതിയ വർക്കിംഗ് ഡൊമെയ്ൻ
+MAIN_URL = "https://new1.hdhub4u.af" 
 
 # FlareSolverr ഉപയോഗിക്കുന്നുണ്ടെങ്കിൽ ഇവിടെ ലിങ്ക് നൽകാം (ഉദാ: "http://192.168.1.100:8191")
 FLARESOLVERR_URL = "" 
@@ -44,9 +45,6 @@ def fetch_and_update_domain():
         pass
 
 def make_request(url):
-    """
-    FlareSolverr ലഭ്യമാണെങ്കിൽ അതുവഴി റിക്വസ്റ്റ് അയക്കുന്നു. അല്ലെങ്കിൽ സാധാരണ രീതിയിൽ.
-    """
     if FLARESOLVERR_URL:
         try:
             payload = {
@@ -61,16 +59,11 @@ def make_request(url):
         except Exception:
             pass
             
-    # Fallback (FlareSolverr ഇല്ലെങ്കിൽ)
     res = requests.get(url, headers=HEADERS, verify=False, timeout=15)
     return res.text
 
 def unpack_js(p, a, c, k):
-    """
-    JavaScript `eval(function(p,a,c,k,e,d))` ഡീകോഡ് ചെയ്യാനുള്ള പൈത്തൺ ലോജിക്
-    """
     chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    
     def to_base(n, base):
         if n == 0: return chars[0]
         res = ""
@@ -78,35 +71,28 @@ def unpack_js(p, a, c, k):
             res = chars[n % base] + res
             n //= base
         return res
-
     word_dict = {}
     for i in range(c):
         key = to_base(i, a)
         word_dict[key] = k[i] if i < len(k) and k[i] else key
-
     def repl(match):
         word = match.group(0)
         return word_dict.get(word, word)
-
     return re.sub(r'\b\w+\b', repl, p)
 
 def resolve_hdstream4u(url):
     try:
         html = make_request(url)
-        
-        # 1. നേരിട്ട് m3u8 ഉണ്ടോയെന്ന് നോക്കുന്നു
         m3u8_match = re.search(r'(https?://[^"\'\s]+\.m3u8[^"\'\s]*)', html, re.IGNORECASE)
         if m3u8_match:
             return m3u8_match.group(1)
             
-        # 2. പാക്ക് ചെയ്ത (Packed) ഡാറ്റ ഉണ്ടോയെന്ന് നോക്കുന്നു
         packed_match = re.search(r"eval\(function\(p,a,c,k,e,d\).*?return p}\('((?:[^'\\]|\\.)*)',\s*(\d+)\s*,\s*(\d+)\s*,\s*'([^']*)'\.split\('\|'\)", html)
         if packed_match:
             p = packed_match.group(1).replace("\\'", "'").replace("\\\\", "\\")
             a = int(packed_match.group(2))
             c = int(packed_match.group(3))
             k = packed_match.group(4).split('|')
-            
             unpacked = unpack_js(p, a, c, k)
             unpacked_match = re.search(r'(https?://[^"\'\s]+\.m3u8[^"\'\s]*)', unpacked, re.IGNORECASE)
             if unpacked_match:
@@ -142,16 +128,12 @@ def resolve_hubdrive(url):
     return None
 
 def get_streams(media_type, media_id, config=None):
-    """
-    MegaSource ഫംഗ്ഷൻ: സ്ട്രീം ലിങ്കുകൾ കണ്ടെത്തുന്നു
-    """
     if media_type != "movie":
         return []
         
     fetch_and_update_domain()
     imdb_id = media_id.split(':')[0]
     
-    # Cinemeta-യിൽ നിന്നും സിനിമയുടെ പേര് എടുക്കുന്നു
     cinemeta_url = f"https://v3-cinemeta.strem.io/meta/{media_type}/{imdb_id}.json"
     try:
         meta_res = requests.get(cinemeta_url, timeout=10).json()
@@ -162,7 +144,6 @@ def get_streams(media_type, media_id, config=None):
     if not movie_name:
         return []
 
-    # പുതിയ URL ഉപയോഗിച്ച് സെർച്ച് ചെയ്യുന്നു
     search_query = urllib.parse.quote(movie_name)
     search_url = f"{MAIN_URL}/search.html?q={search_query}"
     
@@ -173,31 +154,25 @@ def get_streams(media_type, media_id, config=None):
         return []
 
     results = []
-    movie_name_lower = movie_name.lower()
 
-    # സിനിമയുടെ പേര് ഒത്തുനോക്കുന്ന ഫംഗ്ഷൻ (Title Matching)
-    def is_match(title):
-        title_lower = title.lower()
-        if movie_name_lower in title_lower:
-            return True
-        return False
-
+    # കർശനമായ പേര് ഒത്തുനോക്കൽ ഒഴിവാക്കി, ആദ്യത്തെ കൃത്യമായ റിസൾട്ട് എടുക്കുന്നു
     for el in soup.find_all('figcaption'):
         a_tag = el.find('a')
         if a_tag:
             url = a_tag.get('href')
-            title = a_tag.text.strip()
-            if url and len(url) > 10 and is_match(title):
+            title = el.text.strip() or a_tag.text.strip()
+            if url and len(url) > 10:
                 results.append({"title": title, "url": url})
 
     if not results:
-        for selector in ['article', '.post', '.result-item', '.search-result']:
+        for selector in ['article', '.post', '.result-item', '.search-result', '.thumb-wrapper', 'li.thumb']:
             for el in soup.select(selector):
                 a_tag = el.find('a')
                 if a_tag:
                     url = a_tag.get('href')
-                    title = a_tag.text.strip()
-                    if url and len(url) > 10 and is_match(title):
+                    title_elem = el.find(['h2', 'h3', 'p', 'span'])
+                    title = title_elem.text.strip() if title_elem else a_tag.text.strip()
+                    if url and len(url) > 10:
                         abs_url = url if url.startswith('http') else f"{MAIN_URL}{'' if url.startswith('/') else '/'}{url}"
                         results.append({"title": title, "url": abs_url})
 
