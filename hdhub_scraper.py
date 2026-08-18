@@ -7,7 +7,6 @@ Scraper para o addon MegaSource.
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-import time
 import re
 import urllib3
 import json
@@ -16,18 +15,18 @@ import json
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "HDHub4u Scraper"
-VERSION = "1.0.3"
-DESCRIPTION = "Filmes do HDHub4u (Direct & m3u8)"
+VERSION = "1.0.4"
+DESCRIPTION = "Filmes do HDHub4u (Direct & m3u8 via API)"
 
 DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
 MAIN_URL = "https://new1.hdhub4u.af" 
 
-# FlareSolverr ഉപയോഗിക്കുന്നുണ്ടെങ്കിൽ ഇവിടെ ലിങ്ക് നൽകാം (ഉദാ: "http://192.168.1.100:8191")
 FLARESOLVERR_URL = "" 
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Referer": f"{MAIN_URL}/"
+    "Referer": f"{MAIN_URL}/",
+    "Origin": MAIN_URL
 }
 
 def fetch_and_update_domain():
@@ -40,10 +39,12 @@ def fetch_and_update_domain():
             if new_domain != MAIN_URL:
                 MAIN_URL = new_domain
                 HEADERS["Referer"] = f"{MAIN_URL}/"
+                HEADERS["Origin"] = MAIN_URL
     except Exception:
         pass
 
-def make_request(url):
+def make_request(url, custom_headers=None):
+    req_headers = custom_headers if custom_headers else HEADERS
     if FLARESOLVERR_URL:
         try:
             payload = {
@@ -58,7 +59,7 @@ def make_request(url):
         except Exception:
             pass
             
-    res = requests.get(url, headers=HEADERS, verify=False, timeout=15)
+    res = requests.get(url, headers=req_headers, verify=False, timeout=15)
     return res.text
 
 def unpack_js(p, a, c, k):
@@ -143,38 +144,40 @@ def get_streams(media_type, media_id, config=None):
     if not movie_name:
         return []
 
-    # URL-ൽ സ്പേസിന് പകരം '+' വരുന്ന രീതിയിൽ സെറ്റ് ചെയ്യുന്നു
+    # ബ്രോ കണ്ടെത്തിയ ആ രഹസ്യ API ഉപയോഗിച്ചുള്ള സെർച്ച്! 
     search_query = urllib.parse.quote_plus(movie_name)
-    search_url = f"{MAIN_URL}/search.html?q={search_query}"
+    api_url = f"https://search.pingora.fyi/collections/post/documents/search?q={search_query}&query_by=post_title,category,stars,director,imdb_id&query_by_weights=4,2,2,2,4&sort_by=sort_by_date:desc&limit=5&highlight_fields=none"
+    
+    movie_page_url = None
     
     try:
-        search_html = make_request(search_url)
-        soup = BeautifulSoup(search_html, 'html.parser')
-    except Exception:
+        api_res = requests.get(api_url, headers=HEADERS, verify=False, timeout=15)
+        if api_res.status_code == 200:
+            data = api_res.json()
+            hits = data.get("hits", [])
+            
+            if hits:
+                # ആദ്യത്തെ കൃത്യമായ റിസൾട്ട് എടുക്കുന്നു
+                doc = hits[0].get("document", {})
+                
+                # API തരുന്ന JSON-ൽ നിന്ന് സിനിമയുടെ യഥാർത്ഥ ലിങ്ക് അല്ലെങ്കിൽ സ്ലഗ് (Slug) വേർതിരിച്ചെടുക്കുന്നു
+                found_url = doc.get("permalink") or doc.get("url") or doc.get("link")
+                if not found_url and doc.get("post_name"):
+                    found_url = doc.get("post_name")
+                    
+                if found_url:
+                    if found_url.startswith("http"):
+                        movie_page_url = found_url
+                    else:
+                        movie_page_url = f"{MAIN_URL}/{found_url.strip('/')}/"
+    except Exception as e:
+        print(f"API Search Failed: {e}")
+        pass
+
+    if not movie_page_url:
         return []
 
-    results = []
-    movie_name_lower = movie_name.lower().split()[0] # ആദ്യത്തെ വാക്ക് വെച്ച് നോക്കുന്നു (കൂടുതൽ റിസൾട്ട് കിട്ടാൻ)
-
-    # പേജിലെ മുഴുവൻ ലിങ്കുകളും എടുത്ത് സിനിമയുടെ പേരുണ്ടോ എന്ന് പരിശോധിക്കുന്നു
-    for a_tag in soup.find_all('a', href=True):
-        url = a_tag['href']
-        title = a_tag.text.strip()
-        
-        # ലിങ്കിന്റെ പേരിനകത്തോ, അല്ലെങ്കിൽ URL-നകത്തോ സിനിമയുടെ പേരുണ്ടെങ്കിൽ മാത്രം എടുക്കുന്നു
-        if len(title) > 2 and len(url) > 10:
-            if movie_name_lower in title.lower() or movie_name_lower in url.lower():
-                # അനാവശ്യ ടാഗുകളോ കാറ്റഗറി ലിങ്കുകളോ ഒഴിവാക്കുന്നു
-                if '/category/' not in url and '/tag/' not in url:
-                    abs_url = url if url.startswith('http') else f"{MAIN_URL}{'' if url.startswith('/') else '/'}{url}"
-                    results.append({"title": title, "url": abs_url})
-
-    if not results:
-        return []
-
-    # കണ്ടെത്തിയ ആദ്യത്തെ ലിങ്ക് എടുക്കുന്നു
-    movie_page_url = results[0]["url"]
-    
+    # സിനിമയുടെ പേജിൽ നിന്നും ഡയറക്റ്റ് ലിങ്കുകൾ എടുക്കുന്ന ഭാഗം
     try:
         movie_html = make_request(movie_page_url)
         movie_soup = BeautifulSoup(movie_html, 'html.parser')
