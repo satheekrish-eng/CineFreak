@@ -16,7 +16,7 @@ import json
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "HDHub4u Scraper"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DESCRIPTION = "Filmes do HDHub4u (Direct & m3u8)"
 
 DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
@@ -151,7 +151,7 @@ def get_streams(media_type, media_id, config=None):
     fetch_and_update_domain()
     imdb_id = media_id.split(':')[0]
     
-    # Cinemeta-യിൽ നിന്നും പേര് എടുക്കുന്നു
+    # Cinemeta-യിൽ നിന്നും സിനിമയുടെ പേര് എടുക്കുന്നു
     cinemeta_url = f"https://v3-cinemeta.strem.io/meta/{media_type}/{imdb_id}.json"
     try:
         meta_res = requests.get(cinemeta_url, timeout=10).json()
@@ -162,9 +162,9 @@ def get_streams(media_type, media_id, config=None):
     if not movie_name:
         return []
 
-    # സെർച്ച് ചെയ്യുന്നു
+    # പുതിയ URL ഉപയോഗിച്ച് സെർച്ച് ചെയ്യുന്നു
     search_query = urllib.parse.quote(movie_name)
-    search_url = f"{MAIN_URL}/?s={search_query}"
+    search_url = f"{MAIN_URL}/search.html?q={search_query}"
     
     try:
         search_html = make_request(search_url)
@@ -173,13 +173,21 @@ def get_streams(media_type, media_id, config=None):
         return []
 
     results = []
+    movie_name_lower = movie_name.lower()
+
+    # സിനിമയുടെ പേര് ഒത്തുനോക്കുന്ന ഫംഗ്ഷൻ (Title Matching)
+    def is_match(title):
+        title_lower = title.lower()
+        if movie_name_lower in title_lower:
+            return True
+        return False
 
     for el in soup.find_all('figcaption'):
         a_tag = el.find('a')
         if a_tag:
             url = a_tag.get('href')
             title = a_tag.text.strip()
-            if url and len(url) > 10:
+            if url and len(url) > 10 and is_match(title):
                 results.append({"title": title, "url": url})
 
     if not results:
@@ -189,7 +197,7 @@ def get_streams(media_type, media_id, config=None):
                 if a_tag:
                     url = a_tag.get('href')
                     title = a_tag.text.strip()
-                    if url and len(url) > 10:
+                    if url and len(url) > 10 and is_match(title):
                         abs_url = url if url.startswith('http') else f"{MAIN_URL}{'' if url.startswith('/') else '/'}{url}"
                         results.append({"title": title, "url": abs_url})
 
