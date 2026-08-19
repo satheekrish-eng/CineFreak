@@ -12,10 +12,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "NetflixMirror (Net27)"
 VERSION = "1.0.0"
-DESCRIPTION = "NetflixMirror fallback scraper via net27.cc API"
+DESCRIPTION = "NetflixMirror fallback scraper via net77.cc API"
 
 TMDB_API_KEY = "307b7b8ef035c6aa336900aef4e203bd"
-NET27_URL = "https://net27.cc"
+NET27_URL = "https://net77.cc"
 NET27_REFERER = "https://videodownloader.site/"
 
 HEADERS = {
