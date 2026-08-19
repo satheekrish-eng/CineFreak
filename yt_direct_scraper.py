@@ -1,19 +1,27 @@
 """
-MegaSource - YouTube Direct Scraper
+MegaSource - YouTube Direct Scraper (API Version)
 ================================
-Scraper para o addon MegaSource (Nuvio Compatible)
+Scraper para o addon MegaSource (Nuvio Compatible via Piped API)
 """
 
 import requests
+import urllib.parse
+import urllib3
 import re
-try:
-    import yt_dlp
-except ImportError:
-    yt_dlp = None
 
-TITLE = "YT Movies Direct"
-VERSION = "1.10.1"
-DESCRIPTION = "YouTube Streamer with Direct MP4 extraction for Nuvio"
+# SSL വാണിംഗുകൾ ഒഴിവാക്കാൻ
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+TITLE = "YT Movies API"
+VERSION = "1.10.2"
+DESCRIPTION = "YouTube Streamer via Piped API for Nuvio"
+
+# Piped API സെർവറുകൾ (ഒന്ന് വർക്ക് ആയില്ലെങ്കിൽ അടുത്തത് ഉപയോഗിക്കാൻ)
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.tokhmi.xyz",
+    "https://piped-api.garudalinux.org"
+]
 
 # ഒഴിവാക്കേണ്ട ചാനലുകളുടെ ലിസ്റ്റ് 
 BLACKLIST_CHANNELS = [
@@ -25,10 +33,6 @@ def get_streams(media_type, media_id, config=None):
     if media_type != "movie":
         return []
         
-    if not yt_dlp:
-        print("Error: yt-dlp module is not installed!")
-        return []
-
     imdb_id = media_id.split(':')[0]
 
     # 1. Cinemeta-യിൽ നിന്നും സിനിമയുടെ വിവരങ്ങൾ എടുക്കുന്നു
@@ -49,102 +53,117 @@ def get_streams(media_type, media_id, config=None):
     if not movie_name:
         return []
 
-    # സെർച്ച് ചെയ്യാനുള്ള വരികൾ തയ്യാറാക്കുന്നു (Plan A)
+    # സെർച്ച് ചെയ്യാനുള്ള വരികൾ തയ്യാറാക്കുന്നു
     search_query = f"{movie_name} {movie_year} {actor1} {actor2} {movie_language} full movie".replace("  ", " ").strip()
-    print(f"Searching YouTube for: {search_query}")
-
-    # 2. yt-dlp ഉപയോഗിച്ച് സെർച്ച് ചെയ്യുന്നു (വേഗത്തിൽ റിസൾട്ട് എടുക്കാൻ 'extract_flat' ഉപയോഗിക്കുന്നു)
-    ydl_search_opts = {
-        'extract_flat': True,
-        'default_search': 'ytsearch10',  # ആദ്യത്തെ 10 റിസൾട്ടുകൾ എടുക്കുന്നു
-        'quiet': True,
-        'match_filter': yt_dlp.utils.match_filter_func("duration >= 5400"), # 1.5 മണിക്കൂറിന് മുകളിലുള്ളവ
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_search_opts) as ydl:
-            search_info = ydl.extract_info(search_query, download=False)
-    except Exception as e:
-        print(f"yt-dlp Search Error: {e}")
-        return []
-
-    if not search_info or 'entries' not in search_info:
-        return []
-
-    valid_videos = []
+    encoded_query = urllib.parse.quote(search_query)
     
-    # 3. ഫിൽറ്ററിംഗ് & സ്കോറിംഗ് ലോജിക്
-    for vid in search_info['entries']:
-        if not vid: continue
-        
-        channel_name = vid.get('uploader', '').lower()
-        
-        # കരിമ്പട്ടികയിൽ (Blacklist) പെട്ട ചാനലാണോ എന്ന് നോക്കുന്നു
-        is_blacklisted = False
-        for bc in BLACKLIST_CHANNELS:
-            if bc in channel_name or bc.replace(" ", "") in channel_name.replace(" ", ""):
-                is_blacklisted = True
-                break
+    valid_videos = []
+    working_instance = None
+
+    # 2. Piped API ഉപയോഗിച്ച് സെർച്ച് ചെയ്യുന്നു
+    for instance in PIPED_INSTANCES:
+        try:
+            search_url = f"{instance}/search?q={encoded_query}&filter=videos"
+            res = requests.get(search_url, verify=False, timeout=10)
+            
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("items", [])
                 
-        if is_blacklisted:
+                if items:
+                    working_instance = instance
+                    # 3. ഫിൽറ്ററിംഗ് & സ്കോറിംഗ് ലോജിക്
+                    for vid in items:
+                        duration = vid.get("duration", 0)
+                        if duration < 5400:  # 1.5 മണിക്കൂറിന് താഴെയുള്ളവ ഒഴിവാക്കുന്നു
+                            continue
+                            
+                        channel_name = vid.get("uploaderName", "").lower()
+                        
+                        # കരിമ്പട്ടികയിൽ പെട്ട ചാനലാണോ എന്ന് നോക്കുന്നു
+                        is_blacklisted = False
+                        for bc in BLACKLIST_CHANNELS:
+                            if bc in channel_name or bc.replace(" ", "") in channel_name.replace(" ", ""):
+                                is_blacklisted = True
+                                break
+                                
+                        if is_blacklisted:
+                            continue
+                            
+                        title = vid.get("title", "").lower()
+                        clean_title = re.sub(r'[^a-z0-9 ]', ' ', title)
+                        clean_name = re.sub(r'[^a-z0-9 ]', ' ', movie_name.lower()).strip()
+                        year_str = str(movie_year)
+                        
+                        score = 0
+                        # റിലവൻസ് സ്കോറിംഗ് 
+                        if clean_name in clean_title and year_str in clean_title:
+                            score += 50
+                        elif clean_name in clean_title:
+                            score += 20
+                            
+                        # ക്വാളിറ്റി സ്കോറിംഗ് 
+                        if "4k" in title: score += 40
+                        elif "1080p" in title or "full hd" in title: score += 30
+                        elif "720p" in title or "hd" in title: score += 20
+                        
+                        vid_id = vid.get("url", "").replace("/watch?v=", "")
+                        if vid_id:
+                            valid_videos.append({
+                                'id': vid_id, 
+                                'title': vid.get("title", ""),
+                                'uploader': vid.get("uploaderName", ""),
+                                'score': score
+                            })
+                    
+                    break # ഒരു ഇൻസ്റ്റൻസ് വർക്ക് ആയാൽ ബാക്കിയുള്ളവ ഒഴിവാക്കുന്നു
+        except Exception as e:
+            print(f"API Error with {instance}: {e}")
             continue
-            
-        title = vid.get('title', '').lower()
-        clean_title = re.sub(r'[^a-z0-9 ]', ' ', title)
-        clean_name = re.sub(r'[^a-z0-9 ]', ' ', movie_name.lower()).strip()
-        year_str = str(movie_year)
-        
-        score = 0
-        
-        # റിലവൻസ് സ്കോറിംഗ് 
-        if clean_name in clean_title and year_str in clean_title:
-            score += 50
-        elif clean_name in clean_title:
-            score += 20
-            
-        # ക്വാളിറ്റി സ്കോറിംഗ് 
-        if "4k" in title: score += 40
-        elif "1080p" in title or "full hd" in title: score += 30
-        elif "720p" in title or "hd" in title: score += 20
-        
-        valid_videos.append({'video': vid, 'score': score})
+
+    if not valid_videos or not working_instance:
+        return []
 
     # മാർക്കിന്റെ അടിസ്ഥാനത്തിൽ അടുക്കുന്നു
     valid_videos.sort(key=lambda x: x['score'], reverse=True)
-
-    if not valid_videos:
-        return []
-
-    # 4. ഏറ്റവും മികച്ച വീഡിയോയുടെ ഡയറക്റ്റ് mp4 ലിങ്ക് എടുക്കുന്നു
-    top_video = valid_videos[0]['video']
-    video_url = top_video.get('url')
+    top_video = valid_videos[0]
     
-    ydl_extract_opts = {
-        'format': 'best',
-        'quiet': True,
-        'noplaylist': True
-    }
-
+    # 4. ഏറ്റവും മികച്ച വീഡിയോയുടെ ഡയറക്റ്റ് സ്ട്രീം ലിങ്ക് API വഴി എടുക്കുന്നു
     try:
-        with yt_dlp.YoutubeDL(ydl_extract_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            direct_url = info.get('url')
+        stream_url = f"{working_instance}/streams/{top_video['id']}"
+        stream_res = requests.get(stream_url, verify=False, timeout=10)
+        
+        if stream_res.status_code == 200:
+            stream_data = stream_res.json()
             
-            if direct_url:
+            # HLS ലിങ്ക് ഉണ്ടെങ്കിൽ അത് എടുക്കുന്നു (Nuvio-യ്ക്ക് ഏറ്റവും നല്ലത് അതാണ്)
+            direct_link = stream_data.get("hls")
+            
+            # HLS ഇല്ലെങ്കിൽ ആദ്യത്തെ വീഡിയോ സ്ട്രീം എടുക്കുന്നു
+            if not direct_link:
+                video_streams = stream_data.get("videoStreams", [])
+                if video_streams:
+                    # 1080p അല്ലെങ്കിൽ 720p കണ്ടെത്തുന്നു
+                    best_stream = next((s for s in video_streams if "1080p" in s.get("quality", "")), None)
+                    if not best_stream:
+                        best_stream = next((s for s in video_streams if "720p" in s.get("quality", "")), video_streams[0])
+                    direct_link = best_stream.get("url")
+            
+            if direct_link:
                 quality_text = "Standard Quality"
-                if valid_videos[0]['score'] >= 40: quality_text = "🌟 4K Premium"
-                elif valid_videos[0]['score'] >= 30: quality_text = "🔥 Full HD"
-                elif valid_videos[0]['score'] >= 20: quality_text = "✅ HD Video"
+                if top_video['score'] >= 40: quality_text = "🌟 4K Premium"
+                elif top_video['score'] >= 30: quality_text = "🔥 Full HD"
+                elif top_video['score'] >= 20: quality_text = "✅ HD Video"
 
                 return [{
-                    "name": "YT Direct",
-                    "title": f"▶️ {quality_text}\n📺 {info.get('uploader', 'YouTube')}",
-                    "url": direct_url,
+                    "name": "YouTube API",
+                    "title": f"▶️ {quality_text}\n📺 {top_video['uploader']}",
+                    "url": direct_link,
                     "behaviorHints": {
-                        "notWebReady": True # Nuvio-യിലെ പ്ലെയർ പ്രശ്നങ്ങൾ ഒഴിവാക്കാൻ
+                        "notWebReady": True
                     }
                 }]
     except Exception as e:
-        print(f"Extraction Error: {e}")
+        print(f"Stream Extraction Error: {e}")
 
     return []
