@@ -8,18 +8,18 @@ import requests
 import urllib.parse
 import urllib3
 import re
-import json
 
 # SSL വാണിംഗുകൾ ഒഴിവാക്കാൻ
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "Qorva Scraper"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DESCRIPTION = "Vidup API Scraper for MegaSource"
 
 QORVA_API = "https://vidup.to"
 DECRYPT_API = "https://enc-dec.app/api"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+TMDB_API_KEY = "307b7b8ef035c6aa336900aef4e203bd"
 
 def get_headers():
     return {
@@ -46,6 +46,33 @@ def get_lang_code(lang_name):
     }
     return mapping.get(lang_name, "en")
 
+def get_tmdb_id(imdb_id, media_type):
+    # 1. TMDB API
+    try:
+        find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
+        find_res = requests.get(find_url, timeout=10)
+        if find_res.status_code == 200:
+            data = find_res.json()
+            if media_type == 'movie' and data.get("movie_results"):
+                return str(data["movie_results"][0]["id"])
+            elif media_type == 'series' and data.get("tv_results"):
+                return str(data["tv_results"][0]["id"])
+    except Exception:
+        pass
+
+    # 2. Cinemeta Fallback
+    try:
+        meta_url = f"https://v3-cinemeta.strem.io/meta/{media_type}/{imdb_id}.json"
+        meta_res = requests.get(meta_url, timeout=10)
+        if meta_res.status_code == 200:
+            data = meta_res.json()
+            if data and data.get("meta") and data["meta"].get("moviedb_id"):
+                return str(data["meta"]["moviedb_id"])
+    except Exception:
+        pass
+    
+    return None
+
 def resolve_server(csrf_token, stream_url, server):
     try:
         server_data = server.get("data")
@@ -67,8 +94,7 @@ def resolve_server(csrf_token, stream_url, server):
 
         # 2. ഡാറ്റ ഡീകോഡ് ചെയ്യുന്നു
         json_headers = post_headers.copy()
-        json_headers["Content-Type"] = "application/json"
-
+        
         dec_res = requests.post(
             f"{DECRYPT_API}/dec-vidup", 
             headers=json_headers, 
@@ -99,8 +125,7 @@ def resolve_server(csrf_token, stream_url, server):
                 subtitles.append({
                     "url": file_url,
                     "language": get_lang_code(label),
-                    "name": label,
-                    "headers": {"Referer": f"{QORVA_API}/"}
+                    "name": label
                 })
 
         return {
@@ -125,35 +150,22 @@ def resolve_server(csrf_token, stream_url, server):
 def get_streams(media_type, media_id, config=None):
     if ":" in media_id:
         parts = media_id.split(":")
-        tmdb_id = parts[0]
+        imdb_id = parts[0]
         season = parts[1] if len(parts) > 1 else None
         episode = parts[2] if len(parts) > 2 else 1
-        mt = "series"
     else:
-        tmdb_id = media_id
+        imdb_id = media_id
         season = None
         episode = None
-        mt = "movie"
 
-    # TMDB ID ആണ് Qorva ഉപയോഗിക്കുന്നത് എന്ന് Rust കോഡ് കാണിക്കുന്നു
-    # അതുകൊണ്ട് Stremio-ൽ നിന്ന് വരുന്ന IMDb ID-യെ TMDB ആക്കി മാറ്റേണ്ടതുണ്ട്
-    if tmdb_id.startswith("tt"):
-        try:
-            tmdb_api_key = "307b7b8ef035c6aa336900aef4e203bd" # Default fallback key
-            find_url = f"https://api.themoviedb.org/3/find/{tmdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
-            r = requests.get(find_url, timeout=10).json()
-            if mt == 'movie' and r.get('movie_results'):
-                tmdb_id = str(r['movie_results'][0]['id'])
-            elif mt == 'series' and r.get('tv_results'):
-                tmdb_id = str(r['tv_results'][0]['id'])
-            else:
-                return []
-        except Exception:
-            return []
+    # Stremio നൽകുന്ന IMDb ഐഡി ഉപയോഗിച്ച് TMDB ഐഡി എടുക്കുന്നു
+    tmdb_id = get_tmdb_id(imdb_id, media_type)
+    if not tmdb_id:
+        return []
 
     try:
         # 1. പേജ് URL നിർമ്മിക്കുന്നു
-        if mt == "series" and season:
+        if media_type == "series" and season:
             page_url = f"{QORVA_API}/tv/{tmdb_id}/{season}/{episode}"
         else:
             page_url = f"{QORVA_API}/movie/{tmdb_id}"
@@ -177,9 +189,11 @@ def get_streams(media_type, media_id, config=None):
             
         enc_text = page_text[start_idx:end_idx]
 
-        # 3. ഡീകോഡ് API വഴി വിവരങ്ങൾ എടുക്കുന്നു
-        enc_url = f"{DECRYPT_API}/enc-vidup?text={urllib.parse.quote(enc_text)}"
-        enc_res = requests.get(enc_url, headers=get_headers(), verify=False, timeout=10)
+        # 3. ഡീകോഡ് API വഴി വിവരങ്ങൾ എടുക്കുന്നു (safe='' എന്നത് നിർബന്ധമാണ്)
+        encoded_text = urllib.parse.quote(enc_text, safe='')
+        enc_url = f"{DECRYPT_API}/enc-vidup?text={encoded_text}"
+        
+        enc_res = requests.get(enc_url, headers=get_headers(), verify=False, timeout=15)
         
         if enc_res.status_code != 200:
             return []
@@ -207,12 +221,9 @@ def get_streams(media_type, media_id, config=None):
         servers_enc_text = servers_enc_res.text
 
         # 5. സെർവറുകളുടെ ലിസ്റ്റ് ഡീകോഡ് ചെയ്യുന്നു
-        json_headers = csrf_headers.copy()
-        json_headers["Content-Type"] = "application/json"
-
         dec_servers_res = requests.post(
             f"{DECRYPT_API}/dec-vidup", 
-            headers=json_headers, 
+            headers=csrf_headers, 
             json={"text": servers_enc_text}, 
             verify=False, 
             timeout=10
