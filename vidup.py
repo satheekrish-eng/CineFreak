@@ -7,14 +7,13 @@ Scraper para o addon MegaSource.
 import requests
 import urllib.parse
 import urllib3
-import re
 
 # SSL വാണിംഗുകൾ ഒഴിവാക്കാൻ
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TITLE = "Qorva Scraper"
-VERSION = "1.0.1"
-DESCRIPTION = "Vidup API Scraper for MegaSource"
+VERSION = "1.0.2"
+DESCRIPTION = "Vidup API Scraper for MegaSource (Session Fixed)"
 
 QORVA_API = "https://vidup.to"
 DECRYPT_API = "https://enc-dec.app/api"
@@ -35,14 +34,7 @@ def get_lang_code(lang_name):
         "german": "de", "italian": "it", "portuguese": "pt",
         "arabic": "ar", "japanese": "ja", "korean": "ko",
         "hindi": "hi", "thai": "th", "turkish": "tr",
-        "dutch": "nl", "swedish": "sv", "danish": "da",
-        "norwegian": "no", "polish": "pl", "romanian": "ro",
-        "czech": "cs", "hungarian": "hu", "greek": "el",
-        "ukrainian": "uk", "russian": "ru", "hebrew": "he",
-        "indonesian": "id", "malay": "ms", "vietnamese": "vi",
-        "persian": "fa", "chinese": "zh", "zh-tw": "zh",
-        "bengali": "bn", "tamil": "ta", "telugu": "te",
-        "malayalam": "ml", "kannada": "kn", "sinhala": "si"
+        "malayalam": "ml", "tamil": "ta", "telugu": "te"
     }
     return mapping.get(lang_name, "en")
 
@@ -70,37 +62,37 @@ def get_tmdb_id(imdb_id, media_type):
                 return str(data["meta"]["moviedb_id"])
     except Exception:
         pass
-    
     return None
 
-def resolve_server(csrf_token, stream_url, server):
+def resolve_server(session, csrf_token, stream_url, server):
     try:
         server_data = server.get("data")
         if not server_data:
             return None
         server_name = server.get("name", "Vidup")
 
-        # 1. സെർവറിൽ നിന്ന് എൻക്രിപ്റ്റ് ചെയ്ത ഡാറ്റ എടുക്കുന്നു
+        # 1. സെർവറിൽ നിന്ന് ഡാറ്റ എടുക്കുന്നു (കുക്കികൾ നിലനിർത്താൻ session ഉപയോഗിക്കുന്നു)
         post_headers = get_headers()
         post_headers["X-CSRF-Token"] = csrf_token
 
         req_url = f"{stream_url}/{server_data}"
-        res = requests.post(req_url, headers=post_headers, verify=False, timeout=10)
+        res = session.post(req_url, headers=post_headers, verify=False, timeout=15)
         
         if res.status_code != 200:
             return None
             
         enc_text = res.text
 
-        # 2. ഡാറ്റ ഡീകോഡ് ചെയ്യുന്നു
-        json_headers = post_headers.copy()
+        # 2. ഡാറ്റ ഡീകോഡ് ചെയ്യുന്നു (ഇത് പുറത്തുള്ള API ആയതിനാൽ requests മതി)
+        json_headers = get_headers()
+        json_headers["Content-Type"] = "application/json"
         
         dec_res = requests.post(
             f"{DECRYPT_API}/dec-vidup", 
             headers=json_headers, 
             json={"text": enc_text}, 
             verify=False, 
-            timeout=10
+            timeout=15
         )
         
         if dec_res.status_code != 200:
@@ -115,7 +107,7 @@ def resolve_server(csrf_token, stream_url, server):
         if not final_url:
             return None
 
-        # 3. സബ്ടൈറ്റിലുകൾ വേർതിരിച്ചെടുക്കുന്നു
+        # 3. സബ്ടൈറ്റിലുകൾ എടുക്കുന്നു
         tracks = result.get("tracks", [])
         subtitles = []
         for t in tracks:
@@ -130,7 +122,7 @@ def resolve_server(csrf_token, stream_url, server):
 
         return {
             "name": f"VidUp - {server_name}",
-            "title": f"Quality: 1080p\nServer: {server_name}",
+            "title": f"Quality: 1080p | Server: {server_name}",
             "url": final_url,
             "behaviorHints": {
                 "notWebReady": True,
@@ -158,38 +150,48 @@ def get_streams(media_type, media_id, config=None):
         season = None
         episode = None
 
-    # Stremio നൽകുന്ന IMDb ഐഡി ഉപയോഗിച്ച് TMDB ഐഡി എടുക്കുന്നു
     tmdb_id = get_tmdb_id(imdb_id, media_type)
     if not tmdb_id:
         return []
 
+    # ഏറ്റവും പ്രധാനം: കുക്കികൾ സേവ് ചെയ്യാൻ Session ഉപയോഗിക്കുന്നു
+    session = requests.Session()
+
     try:
-        # 1. പേജ് URL നിർമ്മിക്കുന്നു
         if media_type == "series" and season:
             page_url = f"{QORVA_API}/tv/{tmdb_id}/{season}/{episode}"
         else:
             page_url = f"{QORVA_API}/movie/{tmdb_id}"
 
-        res = requests.get(page_url, headers=get_headers(), verify=False, timeout=10)
+        res = session.get(page_url, headers=get_headers(), verify=False, timeout=15)
         if res.status_code != 200:
             return []
             
         page_text = res.text
 
-        # 2. എൻക്രിപ്റ്റ് ചെയ്ത ടെക്സ്റ്റ് വേർതിരിച്ചെടുക്കുന്നു
+        # എൻക്രിപ്റ്റ് ചെയ്ത ടെക്സ്റ്റ് എടുക്കുന്നു
         needle = r'\"en\":\"'
         start_idx = page_text.find(needle)
+        
+        # കോഡ് ചിലപ്പോൾ എസ്കേപ്പ് ചെയ്യാതെയാണെങ്കിലോ എന്ന് കരുതി ഒരു Fallback
+        if start_idx == -1:
+            needle = '"en":"'
+            start_idx = page_text.find(needle)
+            end_char = '"'
+        else:
+            end_char = r'\"'
+
         if start_idx == -1:
             return []
             
         start_idx += len(needle)
-        end_idx = page_text.find(r'\"', start_idx)
+        end_idx = page_text.find(end_char, start_idx)
         if end_idx == -1:
             return []
             
         enc_text = page_text[start_idx:end_idx]
 
-        # 3. ഡീകോഡ് API വഴി വിവരങ്ങൾ എടുക്കുന്നു (safe='' എന്നത് നിർബന്ധമാണ്)
+        # ഡീകോഡ് API
         encoded_text = urllib.parse.quote(enc_text, safe='')
         enc_url = f"{DECRYPT_API}/enc-vidup?text={encoded_text}"
         
@@ -210,23 +212,26 @@ def get_streams(media_type, media_id, config=None):
         if not servers_url or not stream_url or not token:
             return []
 
-        # 4. സെർവറുകളുടെ ലിസ്റ്റ് എടുക്കുന്നു
+        # സെർവറുകളുടെ ലിസ്റ്റ് എടുക്കുന്നു (Session വഴി CSRF Token അയക്കുന്നു)
         csrf_headers = get_headers()
         csrf_headers["X-CSRF-Token"] = token
 
-        servers_enc_res = requests.post(servers_url, headers=csrf_headers, verify=False, timeout=10)
+        servers_enc_res = session.post(servers_url, headers=csrf_headers, verify=False, timeout=15)
         if servers_enc_res.status_code != 200:
             return []
             
         servers_enc_text = servers_enc_res.text
 
-        # 5. സെർവറുകളുടെ ലിസ്റ്റ് ഡീകോഡ് ചെയ്യുന്നു
+        # സെർവറുകളുടെ ലിസ്റ്റ് ഡീകോഡ് ചെയ്യുന്നു
+        dec_json_headers = get_headers()
+        dec_json_headers["Content-Type"] = "application/json"
+        
         dec_servers_res = requests.post(
             f"{DECRYPT_API}/dec-vidup", 
-            headers=csrf_headers, 
+            headers=dec_json_headers, 
             json={"text": servers_enc_text}, 
             verify=False, 
-            timeout=10
+            timeout=15
         )
         
         if dec_servers_res.status_code != 200:
@@ -240,12 +245,12 @@ def get_streams(media_type, media_id, config=None):
         if not server_list:
             return []
 
-        # 6. ഓരോ സെർവറിലെയും ഡാറ്റ എടുക്കുന്നു
+        # ഓരോ സെർവറിലെയും ഡാറ്റ എടുക്കുന്നു
         all_streams = []
         seen_urls = set()
 
         for server in server_list:
-            stream_data = resolve_server(token, stream_url, server)
+            stream_data = resolve_server(session, token, stream_url, server)
             if stream_data:
                 url = stream_data.get("url")
                 if url and url not in seen_urls:
